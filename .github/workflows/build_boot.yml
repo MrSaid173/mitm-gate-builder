@@ -92,6 +92,7 @@ jobs:
           cd ramdisk
           find . ! -name . | cpio -o -H newc > ../ramdisk_new.cpio
           cd ..
+          rm -f ramdisk.cpio
           lz4 -l -9 --favor-decSpeed ramdisk_new.cpio ramdisk.cpio
           ./magiskboot vbmeta --disable vbmeta 2>/dev/null || true
           ./magiskboot repack boot.img boot_patched.img
