@@ -52,19 +52,16 @@ jobs:
           mkdir -p ramdisk-files/etc/security/cacerts
           cp ca/mitmproxy-ca-cert.pem ramdisk-files/etc/security/cacerts/${HASH}.0
           mkdir -p ramdisk-files/sbin
-          # Копируем mitm_gate в sbin
           cp mitm_gate ramdisk-files/sbin/
           chmod 755 ramdisk-files/sbin/mitm_gate
-          # Создаём скрипт запуска
-          cat > ramdisk-files/sbin/mitm_start.sh << 'EOF'
-#!/system/bin/sh
-/sbin/mitm_gate &
-sleep 2
-iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner 0 -j REDIRECT --to-port 8080
-iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner ! --uid-owner 0 -j REDIRECT --to-port 8080
-iptables -A OUTPUT -p udp --dport 443 -j DROP
-mount --bind /etc/security/cacerts /system/etc/security/cacerts 2>/dev/null || true
-EOF
+          # Создаём скрипт запуска (используем printf для избежания проблем с heredoc)
+          printf '%s\n' '#!/system/bin/sh' \
+            '/sbin/mitm_gate &' \
+            'sleep 2' \
+            'iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner 0 -j REDIRECT --to-port 8080' \
+            'iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner ! --uid-owner 0 -j REDIRECT --to-port 8080' \
+            'iptables -A OUTPUT -p udp --dport 443 -j DROP' \
+            'mount --bind /etc/security/cacerts /system/etc/security/cacerts 2>/dev/null || true' > ramdisk-files/sbin/mitm_start.sh
           chmod 755 ramdisk-files/sbin/mitm_start.sh
 
       - name: Unpack and inject
@@ -77,13 +74,13 @@ EOF
           cp -r ramdisk-files/* ramdisk/
           # Добавляем в init.rc, если есть
           if [ -f ramdisk/init.rc ]; then
-            echo 'service mitm_start /sbin/mitm_start.sh' >> ramdisk/init.rc
-            echo '    class late_start' >> ramdisk/init.rc
-            echo '    user root' >> ramdisk/init.rc
-            echo '    disabled' >> ramdisk/init.rc
-            echo '    oneshot' >> ramdisk/init.rc
-            echo 'on property:sys.boot_completed=1' >> ramdisk/init.rc
-            echo '    start mitm_start' >> ramdisk/init.rc
+            printf '%s\n' 'service mitm_start /sbin/mitm_start.sh' \
+              '    class late_start' \
+              '    user root' \
+              '    disabled' \
+              '    oneshot' \
+              'on property:sys.boot_completed=1' \
+              '    start mitm_start' >> ramdisk/init.rc
           fi
 
       - name: Repack
