@@ -1,0 +1,102 @@
+name: Patch boot.img with mitm_gate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  patch-boot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y cpio lz4 openssl
+
+      - name: Download magiskboot
+        run: |
+          wget https://github.com/topjohnwu/Magisk/releases/download/v26.4/Magisk-v26.4.apk
+          unzip Magisk-v26.4.apk -d magisk
+          cp magisk/lib/arm64-v8a/libmagiskboot.so magiskboot
+          chmod +x magiskboot
+
+      - name: Download boot.img and mitm_gate from release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Получим URL релизных ассетов через API
+          RELEASE_ID=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq .id)
+          # Скачиваем boot.img
+          BOOT_URL=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" | \
+            jq -r '.[] | select(.name=="boot.img").browser_download_url')
+          curl -L -o boot.img "$BOOT_URL"
+          # Скачиваем mitm_gate
+          MITM_URL=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" | \
+            jq -r '.[] | select(.name=="mitm_gate").browser_download_url')
+          curl -L -o mitm_gate "$MITM_URL"
+          chmod +x mitm_gate
+
+      - name: Generate CA certificate
+        run: |
+          timeout 5 ./mitm_gate || true
+          mkdir -p ca
+          cp ~/.mitmproxy/mitmproxy-ca-cert.pem ca/
+
+      - name: Prepare cert and ramdisk additions
+        id: cert
+        run: |
+          HASH=$(openssl x509 -inform PEM -subject_hash_old -in ca/mitmproxy-ca-cert.pem | head -1)
+          echo "HASH=$HASH" >> $GITHUB_OUTPUT
+          mkdir -p ramdisk-files/etc/security/cacerts
+          cp ca/mitmproxy-ca-cert.pem ramdisk-files/etc/security/cacerts/${HASH}.0
+          mkdir -p ramdisk-files/sbin
+          # Копируем mitm_gate в sbin
+          cp mitm_gate ramdisk-files/sbin/
+          chmod 755 ramdisk-files/sbin/mitm_gate
+          # Создаём скрипт запуска
+          cat > ramdisk-files/sbin/mitm_start.sh << 'EOF'
+#!/system/bin/sh
+/sbin/mitm_gate &
+sleep 2
+iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner 0 -j REDIRECT --to-port 8080
+iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner ! --uid-owner 0 -j REDIRECT --to-port 8080
+iptables -A OUTPUT -p udp --dport 443 -j DROP
+mount --bind /etc/security/cacerts /system/etc/security/cacerts 2>/dev/null || true
+EOF
+          chmod 755 ramdisk-files/sbin/mitm_start.sh
+
+      - name: Unpack and inject
+        run: |
+          ./magiskboot unpack boot.img
+          mkdir ramdisk
+          cd ramdisk
+          ../magiskboot cpio ../ramdisk.cpio extract
+          cd ..
+          cp -r ramdisk-files/* ramdisk/
+          # Добавляем в init.rc, если есть
+          if [ -f ramdisk/init.rc ]; then
+            echo 'service mitm_start /sbin/mitm_start.sh' >> ramdisk/init.rc
+            echo '    class late_start' >> ramdisk/init.rc
+            echo '    user root' >> ramdisk/init.rc
+            echo '    disabled' >> ramdisk/init.rc
+            echo '    oneshot' >> ramdisk/init.rc
+            echo 'on property:sys.boot_completed=1' >> ramdisk/init.rc
+            echo '    start mitm_start' >> ramdisk/init.rc
+          fi
+
+      - name: Repack
+        run: |
+          cd ramdisk
+          find . ! -name . | cpio -o -H newc > ../ramdisk_new.cpio
+          cd ..
+          lz4 -l -9 --favor-decSpeed ramdisk_new.cpio ramdisk.cpio
+          ./magiskboot vbmeta --disable vbmeta 2>/dev/null || true
+          ./magiskboot repack boot.img boot_patched.img
+
+      - name: Upload patched boot
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot_patched
+          path: boot_patched.img
