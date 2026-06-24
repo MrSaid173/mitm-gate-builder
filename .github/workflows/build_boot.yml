@@ -23,26 +23,28 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Получим URL релизных ассетов через API
           RELEASE_ID=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq .id)
-          # Скачиваем boot.img
           BOOT_URL=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" | \
             jq -r '.[] | select(.name=="boot.img").browser_download_url')
           curl -L -o boot.img "$BOOT_URL"
-          # Скачиваем mitm_gate
           MITM_URL=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" | \
             jq -r '.[] | select(.name=="mitm_gate").browser_download_url')
           curl -L -o mitm_gate "$MITM_URL"
-          chmod +x mitm_gate
+          # не запускаем mitm_gate, просто сохраняем
 
-      - name: Generate CA certificate
+      - name: Generate CA certificate manually
         run: |
-          timeout 5 ./mitm_gate || true
           mkdir -p ca
-          cp ~/.mitmproxy/mitmproxy-ca-cert.pem ca/
+          # Генерируем самоподписанный корневой сертификат, как это делает mitmproxy
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout ca/mitmproxy-ca.pem \
+            -out ca/mitmproxy-ca-cert.pem \
+            -days 3650 \
+            -subj "/C=US/O=mitmproxy/CN=mitmproxy"
+          echo "CA certificate generated"
 
       - name: Prepare cert and ramdisk additions
         id: cert
@@ -52,9 +54,10 @@ jobs:
           mkdir -p ramdisk-files/etc/security/cacerts
           cp ca/mitmproxy-ca-cert.pem ramdisk-files/etc/security/cacerts/${HASH}.0
           mkdir -p ramdisk-files/sbin
+          # копируем бинарник прокси в /sbin
           cp mitm_gate ramdisk-files/sbin/
           chmod 755 ramdisk-files/sbin/mitm_gate
-          # Создаём скрипт запуска (используем printf для избежания проблем с heredoc)
+          # скрипт автозапуска
           printf '%s\n' '#!/system/bin/sh' \
             '/sbin/mitm_gate &' \
             'sleep 2' \
@@ -72,7 +75,6 @@ jobs:
           ../magiskboot cpio ../ramdisk.cpio extract
           cd ..
           cp -r ramdisk-files/* ramdisk/
-          # Добавляем в init.rc, если есть
           if [ -f ramdisk/init.rc ]; then
             printf '%s\n' 'service mitm_start /sbin/mitm_start.sh' \
               '    class late_start' \
