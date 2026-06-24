@@ -12,11 +12,11 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get install -y cpio lz4 openssl
 
-      - name: Download magiskboot
+      - name: Download magiskboot (x86_64)
         run: |
           wget https://github.com/topjohnwu/Magisk/releases/download/v26.4/Magisk-v26.4.apk
           unzip Magisk-v26.4.apk -d magisk
-          cp magisk/lib/arm64-v8a/libmagiskboot.so magiskboot
+          cp magisk/lib/x86_64/libmagiskboot.so magiskboot
           chmod +x magiskboot
 
       - name: Download boot.img and mitm_gate from release
@@ -33,18 +33,15 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" | \
             jq -r '.[] | select(.name=="mitm_gate").browser_download_url')
           curl -L -o mitm_gate "$MITM_URL"
-          # не запускаем mitm_gate, просто сохраняем
 
-      - name: Generate CA certificate manually
+      - name: Generate CA certificate
         run: |
           mkdir -p ca
-          # Генерируем самоподписанный корневой сертификат, как это делает mitmproxy
           openssl req -x509 -newkey rsa:2048 -nodes \
             -keyout ca/mitmproxy-ca.pem \
             -out ca/mitmproxy-ca-cert.pem \
             -days 3650 \
             -subj "/C=US/O=mitmproxy/CN=mitmproxy"
-          echo "CA certificate generated"
 
       - name: Prepare cert and ramdisk additions
         id: cert
@@ -54,17 +51,21 @@ jobs:
           mkdir -p ramdisk-files/etc/security/cacerts
           cp ca/mitmproxy-ca-cert.pem ramdisk-files/etc/security/cacerts/${HASH}.0
           mkdir -p ramdisk-files/sbin
-          # копируем бинарник прокси в /sbin
           cp mitm_gate ramdisk-files/sbin/
           chmod 755 ramdisk-files/sbin/mitm_gate
-          # скрипт автозапуска
-          printf '%s\n' '#!/system/bin/sh' \
+
+          printf '%s\n' \
+            '#!/system/bin/sh' \
+            'mkdir -p /data/local/tmp/.mitmproxy' \
+            'cp /etc/security/cacerts/*.0 /data/local/tmp/.mitmproxy/mitmproxy-ca-cert.pem' \
+            'export HOME=/data/local/tmp' \
             '/sbin/mitm_gate &' \
             'sleep 2' \
             'iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner 0 -j REDIRECT --to-port 8080' \
             'iptables -t nat -A OUTPUT -p tcp --dport 80 -m owner ! --uid-owner 0 -j REDIRECT --to-port 8080' \
             'iptables -A OUTPUT -p udp --dport 443 -j DROP' \
-            'mount --bind /etc/security/cacerts /system/etc/security/cacerts 2>/dev/null || true' > ramdisk-files/sbin/mitm_start.sh
+            'mount --bind /etc/security/cacerts /system/etc/security/cacerts 2>/dev/null || true' \
+            > ramdisk-files/sbin/mitm_start.sh
           chmod 755 ramdisk-files/sbin/mitm_start.sh
 
       - name: Unpack and inject
@@ -76,7 +77,8 @@ jobs:
           cd ..
           cp -r ramdisk-files/* ramdisk/
           if [ -f ramdisk/init.rc ]; then
-            printf '%s\n' 'service mitm_start /sbin/mitm_start.sh' \
+            printf '%s\n' \
+              'service mitm_start /sbin/mitm_start.sh' \
               '    class late_start' \
               '    user root' \
               '    disabled' \
